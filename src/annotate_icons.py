@@ -166,13 +166,8 @@ def load_icon_regions(bbox_path: Path, image_size: Tuple[int, int]) -> List[Icon
     with bbox_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
 
-    if isinstance(payload, dict):
-        if "annotations" in payload:
-            raw_boxes: Sequence = payload["annotations"]
-        elif "boxes" in payload:
-            raw_boxes = payload["boxes"]
-        else:
-            raise ValueError(f"Unsupported bounding box format in {bbox_path}")
+    if isinstance(payload, dict) and "boxes" in payload:
+        raw_boxes: Sequence = payload["boxes"]
     elif isinstance(payload, list):
         raw_boxes = payload
     else:

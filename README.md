@@ -39,17 +39,6 @@ For each screenshot `example.png`, place a JSON file named `example.json` in the
 ]
 ```
 
-You can also reuse the output produced by a previous annotation run:
-
-```json
-{
-  "image": "example.png",
-  "annotations": [
-    {"id": 1, "bbox": [120, 45, 160, 85]},
-    {"id": 2, "bbox": [200, 45, 242, 87]}
-  ]
-}
-
 ```json
 {
   "boxes": [
