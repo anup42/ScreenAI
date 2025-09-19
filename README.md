@@ -86,6 +86,7 @@ Command-line options worth highlighting:
 - `--boxes-dir` – Location of the JSON files. Defaults to the screenshots directory.
 - `--boxes-suffix` – File extension used for the JSON files (default: `.json`).
 - `--crop-padding` – Adds a percentage of padding around each bounding box before sending it to the model (default: 5%).
+- `--max-memory` – Optional per-device memory limits when relying on `--device-map auto`. Example: `--max-memory 0=60GiB,1=60GiB cpu=200GiB`.
 - `--load-in-4bit` – Enables 4-bit quantisation (Linux + CUDA only).
 - `--temperature` / `--top-p` – Control sampling. The default is deterministic output.
 - `--system-prompt` / `--user-prompt` – Customise the prompt template.

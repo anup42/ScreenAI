@@ -67,6 +67,17 @@ def parse_args() -> argparse.Namespace:
         help="Device map argument passed to transformers (default: auto)",
     )
     parser.add_argument(
+        "--max-memory",
+        action="append",
+        default=[],
+        metavar="DEVICE=LIMIT",
+        help=(
+            "Memory constraints passed to transformers when using automatic device "
+            "placement. Specify entries like '0=48GiB' or 'cpu=120GiB'. Provide "
+            "multiple devices either separated by commas or by repeating the option."
+        ),
+    )
+    parser.add_argument(
         "--torch-dtype",
         default="bfloat16",
         choices=["bfloat16", "float16", "float32"],
@@ -153,6 +164,29 @@ def parse_args() -> argparse.Namespace:
         help="Reduce logging verbosity",
     )
     return parser.parse_args()
+
+
+def _parse_max_memory(entries: Sequence[str]) -> Dict[int | str, str]:
+    """Convert ``--max-memory`` CLI values into the format expected by HF."""
+
+    result: Dict[int | str, str] = {}
+    for raw_entry in entries:
+        if not raw_entry:
+            continue
+        chunks = [chunk.strip() for chunk in raw_entry.split(",") if chunk.strip()]
+        for chunk in chunks:
+            if "=" not in chunk:
+                raise ValueError(
+                    "Invalid --max-memory value. Expected entries like '0=48GiB'."
+                )
+            key_text, limit = (part.strip() for part in chunk.split("=", 1))
+            if not key_text or not limit:
+                raise ValueError(
+                    "Invalid --max-memory value. Expected entries like '0=48GiB'."
+                )
+            key: int | str = int(key_text) if key_text.isdigit() else key_text
+            result[key] = limit
+    return result
 
 
 @dataclass
@@ -366,6 +400,10 @@ def load_model_and_processor(args: argparse.Namespace):
         "trust_remote_code": True,
         "low_cpu_mem_usage": True,
     }
+
+    max_memory = _parse_max_memory(args.max_memory)
+    if max_memory:
+        model_kwargs["max_memory"] = max_memory
 
     if args.load_in_4bit:
         if BitsAndBytesConfig is None:
