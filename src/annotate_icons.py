@@ -283,6 +283,59 @@ def build_overlay_conversation(system_prompt: str, user_prompt: str, screenshot:
     ]
 
 
+def _string_to_device(device: object) -> torch.device:
+    if isinstance(device, torch.device):
+        return device
+    if isinstance(device, str):
+        try:
+            return torch.device(device)
+        except (RuntimeError, TypeError):
+            if device == "disk":
+                return torch.device("cpu")
+            raise
+    if isinstance(device, int):
+        return torch.device(f"cuda:{device}")
+    raise TypeError(f"Unsupported device entry {device!r}")
+
+
+def _resolve_modal_device_map(model: PreTrainedModel) -> Tuple[torch.device, Dict[str, torch.device]]:
+    """Return the default device and per-modality overrides.
+
+    When Accelerate shards the model across multiple GPUs the ``hf_device_map``
+    attribute indicates where every module was placed.  The annotation pipeline
+    has to move the text tokens and the pixel values to the matching device
+    before calling ``generate``; otherwise PyTorch keeps everything on the
+    first GPU.
+    """
+
+    device_map = getattr(model, "hf_device_map", None)
+    if not isinstance(device_map, dict) or not device_map:
+        default_device = resolve_model_device(model)
+        return default_device, {"text": default_device, "vision": default_device}
+
+    default_device = _string_to_device(next(iter(device_map.values())))
+    text_device: torch.device | None = None
+    vision_device: torch.device | None = None
+
+    for module_name, raw_device in device_map.items():
+        device = _string_to_device(raw_device)
+        lowered = module_name.lower()
+        if text_device is None and any(
+            token in lowered for token in ("embed_tokens", "language", "text_model", "lm_head")
+        ):
+            text_device = device
+        if vision_device is None and any(
+            token in lowered for token in ("vision", "visual", "clip", "image")
+        ):
+            vision_device = device
+
+    modal_devices = {
+        "text": text_device or default_device,
+        "vision": vision_device or default_device,
+    }
+    return default_device, modal_devices
+
+
 def load_model_and_processor(args: argparse.Namespace):
     dtype_lookup = {
         "bfloat16": torch.bfloat16,
@@ -328,7 +381,12 @@ def resolve_model_device(model: PreTrainedModel) -> torch.device:
     if isinstance(device_map, dict) and device_map:
         first_device = next(iter(device_map.values()))
         if isinstance(first_device, str):
-            return torch.device(first_device)
+            try:
+                return torch.device(first_device)
+            except (RuntimeError, TypeError):
+                if first_device == "disk":
+                    return torch.device("cpu")
+                raise
         if isinstance(first_device, int):
             return torch.device(f"cuda:{first_device}")
     return torch.device("cpu")
@@ -338,16 +396,23 @@ def prepare_inputs(
     processor: AutoProcessor,
     conversation: List[Dict[str, object]],
     image: Image.Image,
-    model_device: torch.device,
+    default_device: torch.device,
+    modal_devices: Dict[str, torch.device],
 ) -> Dict[str, torch.Tensor]:
     prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
     inputs = processor(text=[prompt], images=[image], return_tensors="pt")
     tensor_inputs: Dict[str, torch.Tensor] = {}
     for key, value in inputs.items():
-        if isinstance(value, torch.Tensor):
-            tensor_inputs[key] = value.to(model_device)
-        else:
+        if not isinstance(value, torch.Tensor):
             tensor_inputs[key] = value
+            continue
+
+        key_lower = key.lower()
+        if any(token in key_lower for token in ("pixel", "image")):
+            device = modal_devices.get("vision", default_device)
+        else:
+            device = modal_devices.get("text", default_device)
+        tensor_inputs[key] = value.to(device)
     return tensor_inputs
 
 
@@ -417,6 +482,7 @@ def annotate_screenshot(
     processor: AutoProcessor,
     args: argparse.Namespace,
     model_device: torch.device,
+    modal_devices: Dict[str, torch.device],
 ) -> List[Dict[str, object]]:
     annotations: List[Dict[str, object]] = []
     with Image.open(image_path) as pil_image:
@@ -425,7 +491,13 @@ def annotate_screenshot(
             padded_bbox = icon.padded(args.crop_padding, image.size)
             crop = image.crop(padded_bbox)
             conversation = build_conversation(args.system_prompt, args.user_prompt, icon, image_path)
-            inputs = prepare_inputs(processor, conversation, crop, model_device)
+            inputs = prepare_inputs(
+                processor,
+                conversation,
+                crop,
+                model_device,
+                modal_devices,
+            )
             raw_label = generate_label(model, processor, inputs, args)
             label = normalise_label(raw_label, args.lowercase_output)
             annotations.append(
@@ -446,12 +518,19 @@ def annotate_overlay_screenshot(
     processor: AutoProcessor,
     args: argparse.Namespace,
     model_device: torch.device,
+    modal_devices: Dict[str, torch.device],
 ) -> Dict[str, str]:
     with Image.open(image_path) as pil_image:
         image = pil_image.convert("RGB")
 
     conversation = build_overlay_conversation(args.system_prompt, args.overlay_user_prompt, image_path)
-    inputs = prepare_inputs(processor, conversation, image, model_device)
+    inputs = prepare_inputs(
+        processor,
+        conversation,
+        image,
+        model_device,
+        modal_devices,
+    )
     raw_response = generate_label(model, processor, inputs, args)
     cleaned_response = raw_response.strip()
     if args.lowercase_output:
@@ -511,13 +590,23 @@ def main() -> int:
 
     logging.info("Loading model %s", args.model_name)
     model, processor = load_model_and_processor(args)
-    model_device = resolve_model_device(model)
-    logging.info("Model loaded on device %s", model_device)
+    model_device, modal_devices = _resolve_modal_device_map(model)
+    if getattr(model, "hf_device_map", None):
+        logging.info("Model sharded across devices: %s", model.hf_device_map)
+    else:
+        logging.info("Model loaded on device %s", model_device)
 
     for image_path in tqdm(images, desc="Annotating screenshots"):
         if args.overlay_mode:
             logging.info("Annotating %s using overlay mode", image_path.name)
-            result = annotate_overlay_screenshot(image_path, model, processor, args, model_device)
+            result = annotate_overlay_screenshot(
+                image_path,
+                model,
+                processor,
+                args,
+                model_device,
+                modal_devices,
+            )
             save_overlay_annotation(output_dir, image_path, result, args.model_name)
             continue
 
@@ -537,7 +626,15 @@ def main() -> int:
             continue
 
         logging.info("Annotating %s (%d icons)", image_path.name, len(regions))
-        results = annotate_screenshot(image_path, regions, model, processor, args, model_device)
+        results = annotate_screenshot(
+            image_path,
+            regions,
+            model,
+            processor,
+            args,
+            model_device,
+            modal_devices,
+        )
         save_annotations(output_dir, image_path, results, args.model_name)
 
     logging.info("Annotation complete. Files saved to %s", output_dir)
