@@ -65,6 +65,22 @@ python src/annotate_icons.py \
   --crop-padding 0.05
 ```
 
+### Overlay Mode
+
+If your screenshots already contain drawn bounding boxes with numeric IDs, you can skip
+the separate JSON annotations and ask the model to describe each numbered icon directly:
+
+```bash
+python src/annotate_icons.py \
+  --screenshots-dir data/screenshots_with_boxes \
+  --output-dir results \
+  --overlay-mode
+```
+
+In this mode the script sends the entire screenshot to the model along with the prompt
+defined by `--overlay-user-prompt` (customisable). The resulting JSON contains the raw
+model response plus a lowercased variant when `--lowercase-output` is enabled.
+
 Command-line options worth highlighting:
 
 - `--boxes-dir` – Location of the JSON files. Defaults to the screenshots directory.

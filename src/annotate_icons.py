@@ -118,6 +118,23 @@ def parse_args() -> argparse.Namespace:
         help="User prompt template. Placeholders: {icon_id}, {screenshot_name}",
     )
     parser.add_argument(
+        "--overlay-mode",
+        action="store_true",
+        help=(
+            "Describe numbered icons directly from screenshots that already have "
+            "bounding boxes drawn. Skips external bounding box JSON files."
+        ),
+    )
+    parser.add_argument(
+        "--overlay-user-prompt",
+        default=(
+            "The screenshot '{screenshot_name}' contains multiple icons highlighted "
+            "with numbered boxes. For each visible number, provide a short lowercase "
+            "name for the icon in the format 'ID: name'. Use one line per ID."
+        ),
+        help="User prompt template used when --overlay-mode is enabled.",
+    )
+    parser.add_argument(
         "--lowercase-output",
         dest="lowercase_output",
         action="store_true",
@@ -247,6 +264,20 @@ def build_conversation(system_prompt: str, user_prompt: str, icon: IconRegion, s
             "content": [
                 {"type": "image"},
                 {"type": "text", "text": user_message},
+            ],
+        },
+    ]
+
+
+def build_overlay_conversation(system_prompt: str, user_prompt: str, screenshot: Path) -> List[Dict[str, object]]:
+    message = user_prompt.format(screenshot_name=screenshot.name).strip()
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": message},
             ],
         },
     ]
@@ -409,11 +440,45 @@ def annotate_screenshot(
     return annotations
 
 
+def annotate_overlay_screenshot(
+    image_path: Path,
+    model: AutoModelForCausalLM,
+    processor: AutoProcessor,
+    args: argparse.Namespace,
+    model_device: torch.device,
+) -> Dict[str, str]:
+    with Image.open(image_path) as pil_image:
+        image = pil_image.convert("RGB")
+
+    conversation = build_overlay_conversation(args.system_prompt, args.overlay_user_prompt, image_path)
+    inputs = prepare_inputs(processor, conversation, image, model_device)
+    raw_response = generate_label(model, processor, inputs, args)
+    cleaned_response = raw_response.strip()
+    if args.lowercase_output:
+        cleaned_response = cleaned_response.lower()
+    return {"raw_response": raw_response, "response": cleaned_response}
+
+
 def save_annotations(output_dir: Path, image_path: Path, results: List[Dict[str, object]], model_name: str) -> None:
     payload = {
         "image": image_path.name,
         "model": model_name,
         "annotations": sorted(results, key=lambda item: item["id"]),
+    }
+    target = output_dir / f"{image_path.stem}_labels.json"
+    with target.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def save_overlay_annotation(
+    output_dir: Path, image_path: Path, result: Dict[str, str], model_name: str
+) -> None:
+    payload = {
+        "image": image_path.name,
+        "model": model_name,
+        "mode": "overlay",
+        "raw_response": result["raw_response"],
+        "response": result["response"],
     }
     target = output_dir / f"{image_path.stem}_labels.json"
     with target.open("w", encoding="utf-8") as handle:
@@ -432,7 +497,7 @@ def main() -> int:
         return 1
 
     boxes_dir = args.boxes_dir or args.screenshots_dir
-    if not boxes_dir.exists():
+    if not args.overlay_mode and not boxes_dir.exists():
         logging.error("Bounding boxes directory %s does not exist", boxes_dir)
         return 1
 
@@ -450,6 +515,12 @@ def main() -> int:
     logging.info("Model loaded on device %s", model_device)
 
     for image_path in tqdm(images, desc="Annotating screenshots"):
+        if args.overlay_mode:
+            logging.info("Annotating %s using overlay mode", image_path.name)
+            result = annotate_overlay_screenshot(image_path, model, processor, args, model_device)
+            save_overlay_annotation(output_dir, image_path, result, args.model_name)
+            continue
+
         bbox_path = (boxes_dir / image_path.stem).with_suffix(args.boxes_suffix)
         if not bbox_path.exists():
             logging.warning("Skipping %s because %s is missing", image_path.name, bbox_path.name)
