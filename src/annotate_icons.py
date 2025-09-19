@@ -12,7 +12,7 @@ from typing import Dict, List, Sequence, Tuple
 import torch
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForVision2Seq, AutoProcessor, PreTrainedModel
 
 try:
     from transformers import BitsAndBytesConfig  # type: ignore
@@ -309,13 +309,13 @@ def load_model_and_processor(args: argparse.Namespace):
     else:
         model_kwargs["torch_dtype"] = dtype_lookup[args.torch_dtype]
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
+    model = AutoModelForVision2Seq.from_pretrained(args.model_name, **model_kwargs)
     processor = AutoProcessor.from_pretrained(args.model_name, trust_remote_code=True)
     model.eval()
     return model, processor
 
 
-def resolve_model_device(model: AutoModelForCausalLM) -> torch.device:
+def resolve_model_device(model: PreTrainedModel) -> torch.device:
     device_attr = getattr(model, "device", None)
     if isinstance(device_attr, torch.device):
         return device_attr
@@ -352,7 +352,7 @@ def prepare_inputs(
 
 
 def generate_label(
-    model: AutoModelForCausalLM,
+    model: PreTrainedModel,
     processor: AutoProcessor,
     inputs: Dict[str, torch.Tensor],
     args: argparse.Namespace,
@@ -413,7 +413,7 @@ def normalise_label(text: str, lowercase: bool) -> str:
 def annotate_screenshot(
     image_path: Path,
     regions: List[IconRegion],
-    model: AutoModelForCausalLM,
+    model: PreTrainedModel,
     processor: AutoProcessor,
     args: argparse.Namespace,
     model_device: torch.device,
@@ -442,7 +442,7 @@ def annotate_screenshot(
 
 def annotate_overlay_screenshot(
     image_path: Path,
-    model: AutoModelForCausalLM,
+    model: PreTrainedModel,
     processor: AutoProcessor,
     args: argparse.Namespace,
     model_device: torch.device,
