@@ -336,25 +336,6 @@ def _resolve_modal_device_map(model: PreTrainedModel) -> Tuple[torch.device, Dic
     return default_device, modal_devices
 
 
-def _dtype_supported_on_available_devices(dtype: torch.dtype) -> bool:
-    if dtype is torch.bfloat16:
-        if not torch.cuda.is_available():
-            return False
-        if hasattr(torch.cuda, "is_bf16_supported"):
-            try:
-                if torch.cuda.is_bf16_supported():
-                    return True
-            except RuntimeError:
-                pass
-        device_count = torch.cuda.device_count()
-        for index in range(device_count):
-            capability = torch.cuda.get_device_capability(index)
-            if capability and capability[0] >= 8:
-                return True
-        return False
-    return True
-
-
 def load_model_and_processor(args: argparse.Namespace):
     dtype_lookup = {
         "bfloat16": torch.bfloat16,
@@ -379,18 +360,7 @@ def load_model_and_processor(args: argparse.Namespace):
             bnb_4bit_quant_type="nf4",
         )
     else:
-        requested_dtype = dtype_lookup[args.torch_dtype]
-        if not _dtype_supported_on_available_devices(requested_dtype):
-            fallback = torch.float16
-            logging.warning(
-                "Requested dtype %s is not supported on the available CUDA devices. "
-                "Falling back to %s to reduce memory pressure.",
-                requested_dtype,
-                fallback,
-            )
-        else:
-            fallback = requested_dtype
-        model_kwargs["torch_dtype"] = fallback
+        model_kwargs["torch_dtype"] = dtype_lookup[args.torch_dtype]
 
     model = AutoModelForVision2Seq.from_pretrained(args.model_name, **model_kwargs)
     processor = AutoProcessor.from_pretrained(args.model_name, trust_remote_code=True)
