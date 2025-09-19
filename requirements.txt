@@ -1,0 +1,8 @@
+﻿# Core dependencies for the annotation script
+accelerate>=0.29.0
+Pillow>=10.2.0
+torch>=2.2.0
+transformers>=4.40.0
+tqdm>=4.66.0
+# Optional: only install bitsandbytes on non-Windows platforms for 4-bit loading
+bitsandbytes>=0.43.0; platform_system != "Windows"
