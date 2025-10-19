@@ -1,28 +1,31 @@
-﻿# ScreenAI Icon Annotator
+# ScreenAI Icon Annotator
 
-A small utility that queries the multimodal model `Qwen/Qwen2.5-VL-72B-Instruct` to name icons highlighted inside application screenshots. Each screenshot is paired with a JSON file that contains the bounding boxes of the icons to be described. The script crops every icon region, sends it to the model, and stores the predicted icon names.
+Utilities for naming UI icons inside screenshots using large multimodal models. The project supports both the original Qwen crop-based workflow and a ViP-LLaVA overlay pipeline for screenshots where bounding boxes and IDs are embedded directly in the image.
 
-> **Note**: The Qwen 72B vision-language model is extremely large. Running it locally requires multiple high-memory GPUs or an inference endpoint that exposes the model. The provided script focuses on automating the inference/responses; provisioning the compute is left to you.
+> **Model size warning**: The Qwen 72B and ViP-LLaVA checkpoints are heavy. Expect to provision multiple high-memory GPUs, enable 4-bit quantization, or rely on a hosted inference endpoint.
 
 ## Repository Layout
 
-- `src/annotate_icons.py` – CLI that performs the annotation workflow.
+- `src/annotate_icons.py` – Crop-based annotation workflow that queries `Qwen/Qwen2.5-VL-72B-Instruct`.
+- `src/annotate_icons_vip_llava.py` – Overlay workflow that prompts ViP-LLaVA (7B or 13B) to name labelled icons.
+- `src/export_vip_llava_to_yolo.py` – Converts ViP-LLaVA outputs plus bounding boxes into YOLO label files.
+- `src/visualize_icon_annotations.py` – Draws predicted names beside each bounding box for visual QA.
+- `src/icon_box_utils.py` – Shared helpers for reading and normalising bounding boxes.
 - `requirements.txt` – Python dependencies for local execution.
 
-You can create additional folders such as `screenshots/` and `annotations/` alongside the script. The CLI accepts paths, so the exact layout is flexible.
+Folders such as `screenshots/` and `annotations/` can be arranged as you see fit; the CLIs accept explicit paths.
 
 ## Installation
 
 1. Create and activate a Python 3.10+ environment.
-2. Install the requirements:
+2. Install dependencies:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-3. (Optional) If you plan to enable `--load-in-4bit`, install `bitsandbytes` on a Linux machine with CUDA support.
-
-4. Make sure you are authenticated with Hugging Face if the model requires it:
+3. (Optional) Install `bitsandbytes` if you plan to enable `--load-in-4bit` on CUDA hardware.
+4. Log in to Hugging Face when required:
 
    ```bash
    huggingface-cli login
@@ -30,7 +33,7 @@ You can create additional folders such as `screenshots/` and `annotations/` alon
 
 ## Expected Bounding Box JSON Format
 
-For each screenshot `example.png`, place a JSON file named `example.json` in the bounding-box directory. The script accepts either of the formats below:
+For each screenshot `example.png`, create a JSON file named `example.json` in the bounding-box directory. Any of the formats below are accepted:
 
 ```json
 [
@@ -48,11 +51,11 @@ For each screenshot `example.png`, place a JSON file named `example.json` in the
 }
 ```
 
-- BBoxes can be `[x, y, width, height]` in pixels or `[x1, y1, x2, y2]` in pixels.
-- Normalised coordinates in the range `[0, 1]` are also supported.
-- If an `id` is missing, the script assigns sequential IDs starting at `1`.
+- Bounding boxes can be `[x, y, width, height]` or `[x1, y1, x2, y2]` in pixels.
+- Normalised coordinates in `[0, 1]` are also supported.
+- Missing IDs are filled sequentially, starting at `1`.
 
-## Usage
+## Usage (Qwen Crop-Based)
 
 ```bash
 python src/annotate_icons.py \
@@ -65,10 +68,9 @@ python src/annotate_icons.py \
   --crop-padding 0.05
 ```
 
-### Overlay Mode
+### Overlay Mode (Qwen)
 
-If your screenshots already contain drawn bounding boxes with numeric IDs, you can skip
-the separate JSON annotations and ask the model to describe each numbered icon directly:
+When screenshots already include drawn boxes with numeric IDs, you can skip the external JSON files:
 
 ```bash
 python src/annotate_icons.py \
@@ -77,20 +79,9 @@ python src/annotate_icons.py \
   --overlay-mode
 ```
 
-In this mode the script sends the entire screenshot to the model along with the prompt
-defined by `--overlay-user-prompt` (customisable). The resulting JSON contains the raw
-model response plus a lowercased variant when `--lowercase-output` is enabled.
+The script sends the entire screenshot alongside the overlay prompt (`--overlay-user-prompt` by default) and stores the raw response plus a lowercased variant when `--lowercase-output` is set.
 
-Command-line options worth highlighting:
-
-- `--boxes-dir` – Location of the JSON files. Defaults to the screenshots directory.
-- `--boxes-suffix` – File extension used for the JSON files (default: `.json`).
-- `--crop-padding` – Adds a percentage of padding around each bounding box before sending it to the model (default: 5%).
-- `--load-in-4bit` – Enables 4-bit quantisation (Linux + CUDA only).
-- `--temperature` / `--top-p` – Control sampling. The default is deterministic output.
-- `--system-prompt` / `--user-prompt` – Customise the prompt template.
-
-Each run produces JSON files such as `results/example_labels.json`:
+Example output (`results/example_labels.json`):
 
 ```json
 {
@@ -115,18 +106,65 @@ Each run produces JSON files such as `results/example_labels.json`:
 }
 ```
 
-The `raw_response` field stores the exact model output, while `label` is a normalised version that can be used directly.
+`raw_response` stores the exact model text, while `label` is a normalised string ready for downstream use.
+
+## ViP-LLaVA Overlay Workflow
+
+Choose this pipeline when icons are already boxed and labelled with IDs inside the screenshot.
+
+### 1. Run ViP-LLaVA annotations
+
+```bash
+python src/annotate_icons_vip_llava.py \
+  --images-dir data/screenshots_with_ids \
+  --output-dir results/vip_llava \
+  --model-size 13b \
+  --max-new-tokens 256
+```
+
+- Use `--model-size 7b` (default) or `13b`, or override with `--model-id <repo>`.
+- Enable `--load-in-4bit` for bitsandbytes quantisation (CUDA + Linux required).
+- Customise the instruction via `--prompt` and normalise names with `--lowercase-output`.
+- The script produces files like `results/vip_llava/example_vip_llava.json`, including the raw response, parsed annotations, and any unparsed lines.
+
+### 2. Convert to YOLO labels
+
+```bash
+python src/export_vip_llava_to_yolo.py \
+  --annotations-dir results/vip_llava \
+  --boxes-dir data/boxes \
+  --images-dir data/screenshots_with_ids \
+  --output-dir results/yolo_labels
+```
+
+- Bounding box JSON files must mirror the image names (same format as above).
+- A `classes.txt` file is created or appended in the output directory listing every discovered label.
+- Pass `--strict` to raise if an ID is missing from the box metadata instead of skipping the annotation.
+
+### 3. Visualise predicted names
+
+```bash
+python src/visualize_icon_annotations.py \
+  --annotations-dir results/vip_llava \
+  --boxes-dir data/boxes \
+  --images-dir data/screenshots_with_ids \
+  --output-dir results/visualized \
+  --include-id
+```
+
+- Provide a TTF font through `--font-path` and tune `--font-size` / `--line-width` to suit the UI scale.
+- The script draws coloured rectangles for each box and writes the icon name (and optionally the ID) nearby.
 
 ## Scaling Notes
 
-- Expect the 72B model to need significant GPU memory (multiple 80 GB cards for full precision). For smaller hardware, consider running the script against a hosted inference endpoint or enabling `--load-in-4bit`.
-- When using remote endpoints (for example, Hugging Face Inference Endpoints or vLLM), update `--model-name` to match the deployed model or adapt the script to call your endpoint.
-- You can tune `--max-new-tokens` and the prompt templates to balance accuracy and runtime.
+- Expect the 72B Qwen model to require multiple 80 GB GPUs for full precision. For smaller hardware, use hosted endpoints or quantisation.
+- ViP-LLaVA 7B/13B still benefit greatly from GPUs with ≥24 GB VRAM. Quantisation and `device_map="auto"` help reduce memory pressure.
+- Adjust `--max-new-tokens`, prompts, and sampling parameters in both pipelines to balance accuracy and performance.
 
 ## Development Tips
 
-- Run a syntax check with `python -m py_compile src/annotate_icons.py` before pushing changes.
-- Use `--quiet` during batch runs to reduce console noise, relying on the summarised progress bar instead.
-- Consider keeping a subset of screenshots locally for quick smoke tests before tackling the full dataset.
+- Run syntax checks with `python -m py_compile src/annotate_icons.py src/annotate_icons_vip_llava.py src/export_vip_llava_to_yolo.py src/visualize_icon_annotations.py` before committing.
+- Use `--quiet` for long batch runs to reduce log noise.
+- Keep a small set of representative screenshots handy for smoke testing changes.
 
 Enjoy annotating!
