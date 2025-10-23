@@ -216,6 +216,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable cuDNN usage in PyTorch. Useful when encountering CuDNN internal errors.",
     )
     parser.add_argument(
+        "--enable-tf32",
+        action="store_true",
+        help="Enable TF32 on CUDA (matmul + cuDNN) to broaden kernel availability on Ampere+ GPUs.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Primary device to run inference on (default: cuda if available, else cpu).",
@@ -284,6 +289,13 @@ def main() -> int:
         torch.backends.cudnn.enabled = False
         torch.backends.cudnn.benchmark = False
 
+    if torch.cuda.is_available() and args.enable_tf32:
+        logging.info("Enabling TF32 for matmul and cuDNN backends.")
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            logging.warning("TF32 enable failed; continuing without TF32.")
     if not args.images_dir.exists():
         logging.error("Images directory %s does not exist", args.images_dir)
         return 1
@@ -665,7 +677,12 @@ def prepare_inputs(
             device = modal_devices.get("vision", default_device)
         else:
             device = modal_devices.get("text", default_device)
-        tensor_inputs[key] = value.to(device)
+
+        if value.is_floating_point():
+            desired_dtype = torch.float16 if device.type == "cuda" else value.dtype
+            tensor_inputs[key] = value.to(device=device, dtype=desired_dtype)
+        else:
+            tensor_inputs[key] = value.to(device)
     return tensor_inputs
 
 
