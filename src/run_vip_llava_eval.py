@@ -382,16 +382,20 @@ def _patch_clip_loader(local_path: str | None, offline: bool) -> None:
 
     _validate_local_clip_dir(path)
 
-    orig = CLIPVisionModel.from_pretrained
+    orig = CLIPVisionModel.from_pretrained.__func__  # unwrap classmethod
 
-    def _wrapped(pm, *args, **kwargs):
-        # Replace model id/path with local path and force local-only if requested
-        pm = str(path)
+    def _wrapped(
+        cls,
+        pretrained_model_name_or_path: str | None = None,
+        *model_args,
+        **kwargs,
+    ):
+        load_target = str(path)
         if offline:
             kwargs.setdefault("local_files_only", True)
-        return orig(pm, *args, **kwargs)
+        return orig(cls, load_target, *model_args, **kwargs)
 
-    CLIPVisionModel.from_pretrained = _wrapped  # type: ignore
+    CLIPVisionModel.from_pretrained = classmethod(_wrapped)  # type: ignore
 
 
 def _validate_local_clip_dir(path: Path) -> None:
