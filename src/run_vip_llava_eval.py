@@ -107,8 +107,18 @@ def main() -> int:
     # Validate local model directory if a filesystem path is provided
     _validate_local_model_dir(args.model_path)
 
+    # Heuristic: if local dir has no safetensors files, force use_safetensors=False to
+    # avoid weight-resolution codepaths that expect safetensors and can hit None checks.
+    use_safetensors = _has_safetensors(args.model_path)
+
     tokenizer, model, image_processor, _ = load_pretrained_model(
-        args.model_path, args.model_base, model_name, local_files_only=args.offline
+        args.model_path,
+        args.model_base,
+        model_name,
+        local_files_only=args.offline,
+        use_safetensors=use_safetensors,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
     )
 
     # Determine conversation mode (same heuristic as llava.eval.run_llava)
@@ -334,6 +344,18 @@ def _validate_local_model_dir(model_path: str) -> None:
         raise FileNotFoundError(
             "Model directory is missing required files: " + ", ".join(missing)
         )
+
+
+def _has_safetensors(model_path: str) -> bool:
+    p = Path(model_path)
+    if not p.exists() or not p.is_dir():
+        # Probably a repo id; let downstream decide.
+        return True
+    if (p / "model.safetensors").exists() or (p / "model.safetensors.index.json").exists():
+        return True
+    if any(p.glob("model-*.safetensors")):
+        return True
+    return False
 
 
 if __name__ == "__main__":
