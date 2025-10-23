@@ -91,6 +91,11 @@ def parse_args() -> argparse.Namespace:
         "Defaults to --model-path when not provided.",
     )
     parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Force transformers to rely on existing local files without reaching out to Hugging Face.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Primary device to run inference on (default: cuda if available, else cpu).",
@@ -220,20 +225,15 @@ def resolve_model_id(args: argparse.Namespace) -> str:
 
 
 def resolve_processor_id(args: argparse.Namespace, model_id: str) -> str:
-    if getattr(args, "processor_id", None):
-        return args.processor_id
     if getattr(args, "processor_path", None):
         processor_path = args.processor_path.expanduser().resolve()
         if not processor_path.exists():
             raise FileNotFoundError(f"Processor path {processor_path} does not exist")
         return str(processor_path)
+    if getattr(args, "processor_id", None):
+        return args.processor_id
     if getattr(args, "model_path", None):
-        if args.model_id:
-            return args.model_id
-        try:
-            return MODEL_ALIASES[args.model_size]
-        except KeyError as exc:  # pragma: no cover - guard against future edits
-            raise ValueError(f"Unsupported model size {args.model_size!r}") from exc
+        return model_id
     return model_id
 
 
@@ -272,12 +272,20 @@ def load_model_and_processor(
         if args.device_map:
             model_kwargs["device_map"] = args.device_map
 
+    local_model = args.local_files_only or Path(model_id).exists()
+    if local_model:
+        model_kwargs["local_files_only"] = True
+
     model = VipLlavaForConditionalGeneration.from_pretrained(model_id, **model_kwargs)
     if not args.load_in_4bit and not args.device_map:
         model.to(torch.device(args.device))
     model.eval()
     try:
-        processor = AutoProcessor.from_pretrained(processor_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            processor_id,
+            trust_remote_code=True,
+            local_files_only=(args.local_files_only or Path(processor_id).exists()),
+        )
     except OSError as exc:
         raise RuntimeError(f"Failed to load processor assets from {processor_id}: {exc}") from exc
     return model, processor
