@@ -117,8 +117,6 @@ def main() -> int:
         model_name,
         local_files_only=args.offline,
         use_safetensors=use_safetensors,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
     )
 
     # Determine conversation mode (same heuristic as llava.eval.run_llava)
