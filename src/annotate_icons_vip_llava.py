@@ -201,6 +201,21 @@ def parse_args() -> argparse.Namespace:
         help="Force transformers to rely on existing local files without reaching out to Hugging Face.",
     )
     parser.add_argument(
+        "--vision-device",
+        default=None,
+        help="Optional override for the vision tower device (e.g. cpu, cuda:1).",
+    )
+    parser.add_argument(
+        "--text-device",
+        default=None,
+        help="Optional override for the text tower device (e.g. cuda:0).",
+    )
+    parser.add_argument(
+        "--disable-cudnn",
+        action="store_true",
+        help="Disable cuDNN usage in PyTorch. Useful when encountering CuDNN internal errors.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Primary device to run inference on (default: cuda if available, else cpu).",
@@ -264,6 +279,11 @@ def main() -> int:
         format="%(levelname)s: %(message)s",
     )
 
+    if args.disable_cudnn:
+        logging.info("Disabling cuDNN per --disable-cudnn flag.")
+        torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.benchmark = False
+
     if not args.images_dir.exists():
         logging.error("Images directory %s does not exist", args.images_dir)
         return 1
@@ -291,6 +311,7 @@ def main() -> int:
         logging.info("Model sharded across devices: %s", model.hf_device_map)
     else:
         logging.info("Model loaded on device %s", model_device)
+    model_device, modal_devices = _apply_modal_device_overrides(args, model_device, modal_devices)
 
     for image_path in tqdm(images, desc="Annotating overlay screenshots"):
         annotation = annotate_overlay_image(
@@ -625,6 +646,33 @@ def prepare_inputs(
             device = modal_devices.get("text", default_device)
         tensor_inputs[key] = value.to(device)
     return tensor_inputs
+
+
+def _apply_modal_device_overrides(
+    args: argparse.Namespace,
+    default_device: torch.device,
+    modal_devices: Dict[str, torch.device],
+) -> Tuple[torch.device, Dict[str, torch.device]]:
+    overrides: Dict[str, str] = {}
+    if getattr(args, "text_device", None):
+        overrides["text"] = args.text_device
+    if getattr(args, "vision_device", None):
+        overrides["vision"] = args.vision_device
+
+    if not overrides:
+        return default_device, modal_devices
+
+    updated = dict(modal_devices)
+    for modality, override_value in overrides.items():
+        try:
+            updated[modality] = torch.device(override_value)
+            logging.info("Overriding %s modality device to %s", modality, updated[modality])
+        except (TypeError, RuntimeError) as exc:
+            logging.error("Invalid %s device override %r: %s", modality, override_value, exc)
+            raise SystemExit(1) from exc
+
+    primary_device = updated.get("text", default_device)
+    return primary_device, updated
 
 
 def generate_response(
