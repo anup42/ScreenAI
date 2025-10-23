@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional explicit Hugging Face repository name. Overrides --model-size.",
     )
     parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="Optional local path to a ViP-LLaVA model. Overrides --model-id and --model-size.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Primary device to run inference on (default: cuda if available, else cpu).",
@@ -147,7 +153,11 @@ def main() -> int:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model_id = resolve_model_id(args)
+    try:
+        model_id = resolve_model_id(args)
+    except (FileNotFoundError, ValueError) as exc:
+        logging.error("%s", exc)
+        return 1
     logging.info("Loading ViP-LLaVA model %s", model_id)
     model, processor = load_model_and_processor(model_id, args)
     model_device, modal_devices = _resolve_modal_device_map(model)
@@ -180,6 +190,11 @@ def discover_images(images_dir: Path) -> List[Path]:
 
 
 def resolve_model_id(args: argparse.Namespace) -> str:
+    if getattr(args, "model_path", None):
+        model_path = args.model_path.expanduser()
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model path {model_path} does not exist")
+        return str(model_path)
     if args.model_id:
         return args.model_id
     try:
@@ -460,4 +475,3 @@ def _sort_icon_id(icon_id: str) -> Tuple[int, str]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
