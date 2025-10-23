@@ -106,6 +106,7 @@ def main() -> int:
     model_name = get_model_name_from_path(args.model_path)
     # Validate local model directory if a filesystem path is provided
     _validate_local_model_dir(args.model_path)
+    _verify_weight_shards(args.model_path)
 
     # Heuristic: if local dir has no safetensors files, force use_safetensors=False to
     # avoid weight-resolution codepaths that expect safetensors and can hit None checks.
@@ -354,6 +355,66 @@ def _has_safetensors(model_path: str) -> bool:
     if any(p.glob("model-*.safetensors")):
         return True
     return False
+
+
+def _verify_weight_shards(model_path: str) -> None:
+    """Ensure that all weight shards referenced by the index file exist locally.
+
+    This prevents downstream loaders from producing None checkpoint entries that cause
+    attribute errors like .endswith on None.
+    """
+    path = Path(model_path)
+    if not path.exists() or not path.is_dir():
+        return
+
+    bin_index = path / "pytorch_model.bin.index.json"
+    safetensors_index = path / "model.safetensors.index.json"
+
+    index_file = None
+    expected_ext = None
+    if safetensors_index.exists():
+        index_file = safetensors_index
+        expected_ext = ".safetensors"
+    elif bin_index.exists():
+        index_file = bin_index
+        expected_ext = ".bin"
+    else:
+        # If no index file, rely on single-file names if present
+        single_candidates = [path / "pytorch_model.bin", path / "model.safetensors"]
+        if any(p.exists() for p in single_candidates):
+            return
+        # Nothing we can verify here
+        return
+
+    import json
+    try:
+        with index_file.open("r", encoding="utf-8") as f:
+            idx = json.load(f)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read weight index {index_file}: {exc}") from exc
+
+    weight_map = idx.get("weight_map") or {}
+    shard_names = sorted(set(weight_map.values()))
+    missing = []
+    wrong_ext = []
+    for name in shard_names:
+        if not isinstance(name, str):
+            missing.append(str(name))
+            continue
+        if expected_ext and not name.endswith(expected_ext):
+            wrong_ext.append(name)
+        if not (path / name).exists():
+            missing.append(name)
+
+    if wrong_ext:
+        raise RuntimeError(
+            "Weight index references shards with wrong extension for this index: "
+            + ", ".join(wrong_ext)
+        )
+    if missing:
+        raise FileNotFoundError(
+            "Missing weight shard files referenced by index: " + ", ".join(missing)
+        )
 
 
 if __name__ == "__main__":
