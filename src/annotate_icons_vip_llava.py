@@ -391,6 +391,10 @@ def load_model_and_processor(
         if processor_local_only:
             processor_kwargs["local_files_only"] = True
         processor = AutoProcessor.from_pretrained(processor_id, **processor_kwargs)
+    except ModuleNotFoundError as exc:
+        if exc.name and "protobuf" in exc.name.lower():
+            _raise_missing_protobuf_error(exc)
+        raise
     except (OSError, ValueError) as exc:
         logging.warning(
             "AutoProcessor loading failed for %s (%s). Falling back to manual tokenizer/image processor.",
@@ -412,6 +416,10 @@ def _build_manual_vip_llava_processor(
     tokenizer_kwargs: Dict[str, object] = {"local_files_only": local_files_only, "use_fast": False}
     try:
         tokenizer = AutoTokenizer.from_pretrained(processor_id, **tokenizer_kwargs)
+    except ModuleNotFoundError as exc:
+        if exc.name and "protobuf" in exc.name.lower():
+            _raise_missing_protobuf_error(exc)
+        raise
     except OSError as exc:
         raise RuntimeError(f"Failed to load tokenizer assets from {processor_id}: {exc}") from exc
 
@@ -447,6 +455,10 @@ def _load_vip_llava_image_processor(
     image_kwargs: Dict[str, object] = {"local_files_only": local_files_only}
     try:
         return AutoImageProcessor.from_pretrained(processor_id, **image_kwargs)
+    except ModuleNotFoundError as exc:
+        if exc.name and "protobuf" in exc.name.lower():
+            _raise_missing_protobuf_error(exc)
+        raise
     except OSError:
         logging.info(
             "Falling back to built-in CLIP image processor defaults for %s", processor_id
@@ -479,6 +491,14 @@ def _ensure_processor_defaults(processor: AutoProcessor | VipLlavaProcessorAdapt
         processor.chat_template = DEFAULT_VIP_LLAVA_CHAT_TEMPLATE
     if getattr(processor, "image_token", None) is None:
         setattr(processor, "image_token", "<image>")
+
+
+def _raise_missing_protobuf_error(exc: ModuleNotFoundError) -> None:
+    message = (
+        "The protobuf package is required to load ViP-LLaVA tokenizer/processor assets but was not found.\n"
+        "Install protobuf (e.g. `pip install protobuf>=3.20.0`) or ensure it is available on PYTHONPATH."
+    )
+    raise RuntimeError(message) from exc
 
 
 def annotate_overlay_image(
