@@ -450,6 +450,7 @@ def load_model_and_processor(
             args.local_files_only or Path(processor_id).exists(),
         )
     _ensure_processor_defaults(processor)
+    _align_tokenizer_and_model(model, processor)
     return model, processor
 
 
@@ -535,6 +536,39 @@ def _ensure_processor_defaults(processor: AutoProcessor | VipLlavaProcessorAdapt
         processor.chat_template = DEFAULT_VIP_LLAVA_CHAT_TEMPLATE
     if getattr(processor, "image_token", None) is None:
         setattr(processor, "image_token", "<image>")
+
+
+def _align_tokenizer_and_model(model: PreTrainedModel, processor: AutoProcessor | VipLlavaProcessorAdapter) -> None:
+    """Ensure tokenizer special tokens exist and embeddings match tokenizer size.
+
+    Device-side asserts often occur when the tokenizer introduces new tokens (e.g., "<image>")
+    but the model's embedding matrices are not resized. This syncs sizes and pad/eos indices.
+    """
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        return
+
+    # Ensure pad token IDs are consistently set on the model
+    if getattr(tokenizer, "pad_token_id", None) is not None:
+        try:
+            model.config.pad_token_id = tokenizer.pad_token_id
+            if hasattr(model, "generation_config"):
+                model.generation_config.pad_token_id = tokenizer.pad_token_id
+        except Exception:
+            pass
+
+    # Resize embeddings if tokenizer size differs
+    try:
+        vocab_size = len(tokenizer)
+        try:
+            emb_size = model.get_input_embeddings().weight.shape[0]
+        except Exception:
+            emb_size = getattr(model.config, "vocab_size", vocab_size)
+        if vocab_size != emb_size:
+            logging.info("Resizing token embeddings from %d to %d", emb_size, vocab_size)
+            model.resize_token_embeddings(vocab_size)
+    except Exception as exc:
+        logging.warning("Could not align tokenizer/model embeddings: %s", exc)
 
 
 def _raise_missing_protobuf_error(exc: ModuleNotFoundError) -> None:
