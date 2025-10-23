@@ -191,10 +191,11 @@ def annotate_image_llava(
     )
 
     stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids)
+    stop_tokens = [stop_str] if isinstance(stop_str, str) and len(stop_str) > 0 else []
+    stopping_criteria = KeywordsStoppingCriteria(stop_tokens, tokenizer, input_ids) if stop_tokens else None
 
     with torch.inference_mode():
-        output_ids = model.generate(
+        gen_kwargs = dict(
             input_ids,
             images=images_tensor,
             do_sample=temperature > 0,
@@ -203,11 +204,14 @@ def annotate_image_llava(
             num_beams=num_beams,
             max_new_tokens=max_new_tokens,
             use_cache=True,
-            stopping_criteria=[stopping_criteria],
         )
+        if stopping_criteria is not None:
+            gen_kwargs["stopping_criteria"] = [stopping_criteria]
+        output_ids = model.generate(**gen_kwargs)
 
     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
-    if outputs.endswith(stop_str):
+    outputs = outputs if isinstance(outputs, str) else ("" if outputs is None else str(outputs))
+    if stop_tokens and outputs.endswith(stop_str):
         outputs = outputs[: -len(stop_str)]
     outputs = outputs.strip()
 
