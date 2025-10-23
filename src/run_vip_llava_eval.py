@@ -35,6 +35,7 @@ from llava.mm_utils import (
     get_model_name_from_path,
     KeywordsStoppingCriteria,
 )
+from transformers import CLIPVisionModel
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -67,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-base", default=None, help="Optional base model for LoRA/MM-projector variants")
     parser.add_argument("--conv-mode", default=None, help="Conversation template override (auto if omitted)")
     parser.add_argument("--offline", action="store_true", help="Force offline mode; never attempt to reach HF.")
+    parser.add_argument(
+        "--vision-tower-path",
+        default=None,
+        help="Local path to CLIP vision tower (e.g., openai/clip-vit-large-patch14-336) for offline use.",
+    )
 
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -100,6 +106,10 @@ def main() -> int:
         logging.error("No images found in %s", args.images_dir)
         return 1
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Patch CLIP vision tower loader if a local path is provided
+    if args.vision_tower_path:
+        _patch_clip_loader(args.vision_tower_path, args.offline)
 
     # Load model via llava
     disable_torch_init()
@@ -355,6 +365,48 @@ def _has_safetensors(model_path: str) -> bool:
     if any(p.glob("model-*.safetensors")):
         return True
     return False
+
+
+def _patch_clip_loader(local_path: str | None, offline: bool) -> None:
+    """Monkeypatch CLIPVisionModel.from_pretrained to use a local path when provided.
+
+    This avoids downloading the CLIP vision tower (openai/clip-vit-large-patch14-336)
+    in offline environments. If a local path is provided, we enforce local_files_only.
+    """
+    if not local_path:
+        return
+    path = Path(local_path)
+    if not path.exists():
+        logging.error("Provided --vision-tower-path does not exist: %s", path)
+        return
+
+    _validate_local_clip_dir(path)
+
+    orig = CLIPVisionModel.from_pretrained
+
+    def _wrapped(pm, *args, **kwargs):
+        # Replace model id/path with local path and force local-only if requested
+        pm = str(path)
+        if offline:
+            kwargs.setdefault("local_files_only", True)
+        return orig(pm, *args, **kwargs)
+
+    CLIPVisionModel.from_pretrained = _wrapped  # type: ignore
+
+
+def _validate_local_clip_dir(path: Path) -> None:
+    req = [path / "config.json"]
+    has_weights = any([
+        (path / "pytorch_model.bin").exists(),
+        (path / "model.safetensors").exists(),
+        any(path.glob("pytorch_model-*.bin")),
+        any(path.glob("model-*.safetensors")),
+    ])
+    missing = [p.name for p in req if not p.exists()]
+    if not has_weights:
+        missing.append("(vision) pytorch_model.bin or model.safetensors (or shards)")
+    if missing:
+        logging.warning("Vision tower folder may be incomplete: %s", ", ".join(missing))
 
 
 def _verify_weight_shards(model_path: str) -> None:
