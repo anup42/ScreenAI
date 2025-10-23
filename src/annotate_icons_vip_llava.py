@@ -78,6 +78,19 @@ def parse_args() -> argparse.Namespace:
         help="Optional local path to a ViP-LLaVA model. Overrides --model-id and --model-size.",
     )
     parser.add_argument(
+        "--processor-id",
+        default=None,
+        help="Optional Hugging Face repository name for the processor/tokenizer. "
+        "Useful when supplying a local --model-path without processor assets.",
+    )
+    parser.add_argument(
+        "--processor-path",
+        type=Path,
+        default=None,
+        help="Optional local path containing processor/tokenizer assets. "
+        "Defaults to --model-path when not provided.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Primary device to run inference on (default: cuda if available, else cpu).",
@@ -155,11 +168,14 @@ def main() -> int:
 
     try:
         model_id = resolve_model_id(args)
+        processor_id = resolve_processor_id(args, model_id)
     except (FileNotFoundError, ValueError) as exc:
         logging.error("%s", exc)
         return 1
     logging.info("Loading ViP-LLaVA model %s", model_id)
-    model, processor = load_model_and_processor(model_id, args)
+    if processor_id != model_id:
+        logging.info("Using processor assets from %s", processor_id)
+    model, processor = load_model_and_processor(model_id, processor_id, args)
     model_device, modal_devices = _resolve_modal_device_map(model)
     if getattr(model, "hf_device_map", None):
         logging.info("Model sharded across devices: %s", model.hf_device_map)
@@ -191,7 +207,7 @@ def discover_images(images_dir: Path) -> List[Path]:
 
 def resolve_model_id(args: argparse.Namespace) -> str:
     if getattr(args, "model_path", None):
-        model_path = args.model_path.expanduser()
+        model_path = args.model_path.expanduser().resolve()
         if not model_path.exists():
             raise FileNotFoundError(f"Model path {model_path} does not exist")
         return str(model_path)
@@ -203,8 +219,27 @@ def resolve_model_id(args: argparse.Namespace) -> str:
         raise ValueError(f"Unsupported model size {args.model_size!r}") from exc
 
 
+def resolve_processor_id(args: argparse.Namespace, model_id: str) -> str:
+    if getattr(args, "processor_id", None):
+        return args.processor_id
+    if getattr(args, "processor_path", None):
+        processor_path = args.processor_path.expanduser().resolve()
+        if not processor_path.exists():
+            raise FileNotFoundError(f"Processor path {processor_path} does not exist")
+        return str(processor_path)
+    if getattr(args, "model_path", None):
+        if args.model_id:
+            return args.model_id
+        try:
+            return MODEL_ALIASES[args.model_size]
+        except KeyError as exc:  # pragma: no cover - guard against future edits
+            raise ValueError(f"Unsupported model size {args.model_size!r}") from exc
+    return model_id
+
+
 def load_model_and_processor(
     model_id: str,
+    processor_id: str,
     args: argparse.Namespace,
 ) -> Tuple[PreTrainedModel, AutoProcessor]:
     dtype_map = {
@@ -241,7 +276,10 @@ def load_model_and_processor(
     if not args.load_in_4bit and not args.device_map:
         model.to(torch.device(args.device))
     model.eval()
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    try:
+        processor = AutoProcessor.from_pretrained(processor_id, trust_remote_code=True)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to load processor assets from {processor_id}: {exc}") from exc
     return model, processor
 
 
