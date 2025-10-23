@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -65,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, help="Model path or HF repo id (e.g. mucai/vip-llava-7b)")
     parser.add_argument("--model-base", default=None, help="Optional base model for LoRA/MM-projector variants")
     parser.add_argument("--conv-mode", default=None, help="Conversation template override (auto if omitted)")
+    parser.add_argument("--offline", action="store_true", help="Force offline mode; never attempt to reach HF.")
 
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -84,6 +86,12 @@ def main() -> int:
         format="%(levelname)s: %(message)s",
     )
 
+    # Enforce offline behavior if requested
+    if args.offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
     if not args.images_dir.exists():
         logging.error("Images directory %s does not exist", args.images_dir)
         return 1
@@ -96,8 +104,11 @@ def main() -> int:
     # Load model via llava
     disable_torch_init()
     model_name = get_model_name_from_path(args.model_path)
+    # Validate local model directory if a filesystem path is provided
+    _validate_local_model_dir(args.model_path)
+
     tokenizer, model, image_processor, _ = load_pretrained_model(
-        args.model_path, args.model_base, model_name
+        args.model_path, args.model_base, model_name, local_files_only=args.offline
     )
 
     # Determine conversation mode (same heuristic as llava.eval.run_llava)
@@ -282,6 +293,43 @@ def discover_images(images_dir: Path) -> List[Path]:
     return sorted(
         p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     )
+
+
+def _validate_local_model_dir(model_path: str) -> None:
+    """If model_path looks like a local folder, ensure key files exist.
+
+    This prevents Transformers from attempting hub downloads when a file is missing.
+    """
+    path = Path(model_path)
+    if not path.exists():
+        # Likely a repo id; let llava/transformers handle error messaging.
+        return
+    if not path.is_dir():
+        return
+
+    required = [
+        path / "config.json",
+        path / "generation_config.json",
+        path / "tokenizer_config.json",
+        path / "special_tokens_map.json",
+        path / "tokenizer.model",
+    ]
+    has_weights = any([
+        (path / "pytorch_model.bin").exists(),
+        (path / "pytorch_model.bin.index.json").exists(),
+        any(path.glob("pytorch_model-*.bin")),
+        (path / "model.safetensors").exists(),
+        (path / "model.safetensors.index.json").exists(),
+        any(path.glob("model-*.safetensors")),
+    ])
+
+    missing = [str(p.name) for p in required if not p.exists()]
+    if not has_weights:
+        missing.append("pytorch_model(.bin/.index.json + shards) or model(.safetensors/.index.json + shards)")
+    if missing:
+        raise FileNotFoundError(
+            "Model directory is missing required files: " + ", ".join(missing)
+        )
 
 
 if __name__ == "__main__":
