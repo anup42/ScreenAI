@@ -375,6 +375,16 @@ def load_model_and_processor(
         "float32": torch.float32,
     }
     chosen_dtype = dtype_map[args.torch_dtype]
+    # Guard against unsupported bf16 on many GPUs (e.g., V100/T4). If bf16 requested but
+    # not supported on CUDA, fall back to float16 to avoid matmul/conv engine errors.
+    try:
+        if args.torch_dtype == "bfloat16" and torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+            logging.warning(
+                "bfloat16 not supported on this GPU; falling back to float16 to ensure kernels are available."
+            )
+            chosen_dtype = torch.float16
+    except Exception:  # pragma: no cover
+        pass
     if args.device == "cpu" and chosen_dtype != torch.float32 and not args.load_in_4bit:
         logging.warning(
             "Overriding torch dtype to float32 because the CPU backend does not support %s",
