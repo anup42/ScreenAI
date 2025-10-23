@@ -384,6 +384,8 @@ def _patch_clip_loader(local_path: str | None, offline: bool) -> None:
 
     orig = CLIPVisionModel.from_pretrained.__func__  # unwrap classmethod
 
+    has_safetensors = _has_safetensors(str(path))
+
     def _wrapped(
         cls,
         pretrained_model_name_or_path: str | None = None,
@@ -393,6 +395,8 @@ def _patch_clip_loader(local_path: str | None, offline: bool) -> None:
         load_target = str(path)
         if offline:
             kwargs.setdefault("local_files_only", True)
+        if not has_safetensors:
+            kwargs.setdefault("use_safetensors", False)
         return orig(cls, load_target, *model_args, **kwargs)
 
     CLIPVisionModel.from_pretrained = classmethod(_wrapped)  # type: ignore
