@@ -13,7 +13,14 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import torch
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, PreTrainedModel, VipLlavaForConditionalGeneration
+from transformers import (
+    AutoImageProcessor,
+    AutoProcessor,
+    AutoTokenizer,
+    CLIPImageProcessor,
+    PreTrainedModel,
+    VipLlavaForConditionalGeneration,
+)
 
 try:
     from transformers import BitsAndBytesConfig  # type: ignore
@@ -32,6 +39,104 @@ Please respond in the format:
 ID1: [icon name]
 ID2: [icon name]
 ID3: [icon name]"""
+DEFAULT_VIP_LLAVA_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'user' %}{{ '###Human: '}}"
+    "{% elif message['role'] == 'assistant' %}{{ '###' + message['role'].title() + ': '}}{% endif %}"
+    "{% for content in message['content'] | selectattr('type', 'equalto', 'image') %}{{ '<image>\\n' }}{% endfor %}"
+    "{% for content in message['content'] | selectattr('type', 'equalto', 'text') %}{{ content['text'] }}{% endfor %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '###Assistant:' }}{% endif %}"
+)
+DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG: Dict[str, object] = {
+    "crop_size": {"height": 336, "width": 336},
+    "do_center_crop": True,
+    "do_convert_rgb": True,
+    "do_normalize": True,
+    "do_rescale": True,
+    "do_resize": True,
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+    "resample": Image.Resampling.BICUBIC,
+    "rescale_factor": 0.00392156862745098,
+    "size": {"shortest_edge": 336},
+}
+
+
+class VipLlavaProcessorAdapter:
+    """Lightweight processor wrapper when AutoProcessor assets are unavailable."""
+
+    def __init__(
+        self,
+        tokenizer,
+        image_processor,
+        chat_template: str = DEFAULT_VIP_LLAVA_CHAT_TEMPLATE,
+        image_token: str = "<image>",
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.chat_template = chat_template
+        self.image_token = image_token
+
+    def apply_chat_template(
+        self,
+        conversation: List[Dict[str, object]],
+        add_generation_prompt: bool = True,
+        **_: object,
+    ) -> str:
+        parts: List[str] = []
+        for message in conversation:
+            role = str(message.get("role", "user")).lower()
+            if role == "user":
+                parts.append("###Human: ")
+            elif role == "assistant":
+                parts.append("###Assistant: ")
+            elif role == "system":
+                parts.append("###System: ")
+            else:
+                parts.append(f"###{role.title()}: ")
+
+            content = message.get("content", [])
+            if isinstance(content, dict):
+                content = [content]
+            if isinstance(content, list):
+                for item in content:
+                    if getattr(item, "get", None) and item.get("type") == "image":
+                        parts.append(f"{self.image_token}\n")
+                for item in content:
+                    if getattr(item, "get", None) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            parts.append(text)
+            parts.append("\n")
+        if add_generation_prompt:
+            parts.append("###Assistant:")
+        return "".join(parts).strip()
+
+    def batch_decode(self, *args, **kwargs):
+        return self.tokenizer.batch_decode(*args, **kwargs)
+
+    def __call__(
+        self,
+        text: Sequence[str],
+        images: Sequence[Image.Image],
+        return_tensors: str = "pt",
+        **kwargs: object,
+    ) -> Dict[str, torch.Tensor]:
+        tokenized = self.tokenizer(
+            list(text),
+            padding=True,
+            truncation=True,
+            return_tensors=return_tensors,
+        )
+        image_inputs = self.image_processor(
+            list(images),
+            return_tensors=return_tensors,
+        )
+        combined: Dict[str, torch.Tensor] = {}
+        combined.update(dict(tokenized))
+        combined.update(dict(image_inputs))
+        return combined
 
 
 @dataclass
@@ -281,14 +386,99 @@ def load_model_and_processor(
         model.to(torch.device(args.device))
     model.eval()
     try:
-        processor = AutoProcessor.from_pretrained(
+        processor_local_only = args.local_files_only or Path(processor_id).exists()
+        processor_kwargs: Dict[str, object] = {"trust_remote_code": True}
+        if processor_local_only:
+            processor_kwargs["local_files_only"] = True
+        processor = AutoProcessor.from_pretrained(processor_id, **processor_kwargs)
+    except (OSError, ValueError) as exc:
+        logging.warning(
+            "AutoProcessor loading failed for %s (%s). Falling back to manual tokenizer/image processor.",
             processor_id,
-            trust_remote_code=True,
-            local_files_only=(args.local_files_only or Path(processor_id).exists()),
+            exc,
         )
-    except OSError as exc:
-        raise RuntimeError(f"Failed to load processor assets from {processor_id}: {exc}") from exc
+        processor = _build_manual_vip_llava_processor(
+            processor_id,
+            args.local_files_only or Path(processor_id).exists(),
+        )
+    _ensure_processor_defaults(processor)
     return model, processor
+
+
+def _build_manual_vip_llava_processor(
+    processor_id: str,
+    local_files_only: bool,
+) -> VipLlavaProcessorAdapter:
+    tokenizer_kwargs: Dict[str, object] = {"local_files_only": local_files_only, "use_fast": False}
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(processor_id, **tokenizer_kwargs)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to load tokenizer assets from {processor_id}: {exc}") from exc
+
+    # Ensure padding token is available for batching
+    if getattr(tokenizer, "pad_token", None) is None:
+        if getattr(tokenizer, "eos_token", None):
+            tokenizer.pad_token = tokenizer.eos_token
+        elif getattr(tokenizer, "unk_token", None):
+            tokenizer.pad_token = tokenizer.unk_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+            tokenizer.pad_token = "<pad>"
+    tokenizer.padding_side = getattr(tokenizer, "padding_side", "left")
+
+    # Guarantee the <image> token exists.
+    image_token = getattr(tokenizer, "image_token", "<image>")
+    if tokenizer.convert_tokens_to_ids(image_token) == tokenizer.unk_token_id:
+        tokenizer.add_special_tokens({"additional_special_tokens": [image_token]})
+
+    image_processor = _load_vip_llava_image_processor(processor_id, local_files_only)
+    return VipLlavaProcessorAdapter(
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        chat_template=DEFAULT_VIP_LLAVA_CHAT_TEMPLATE,
+        image_token=image_token,
+    )
+
+
+def _load_vip_llava_image_processor(
+    processor_id: str,
+    local_files_only: bool,
+):
+    image_kwargs: Dict[str, object] = {"local_files_only": local_files_only}
+    try:
+        return AutoImageProcessor.from_pretrained(processor_id, **image_kwargs)
+    except OSError:
+        logging.info(
+            "Falling back to built-in CLIP image processor defaults for %s", processor_id
+        )
+        return CLIPImageProcessor(
+            do_resize=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["do_resize"],
+            size=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["size"],
+            resample=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["resample"],
+            do_center_crop=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["do_center_crop"],
+            crop_size=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["crop_size"],
+            do_rescale=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["do_rescale"],
+            rescale_factor=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["rescale_factor"],
+            do_normalize=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["do_normalize"],
+            image_mean=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["image_mean"],
+            image_std=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["image_std"],
+            do_convert_rgb=DEFAULT_VIP_LLAVA_IMAGE_PROCESSOR_CONFIG["do_convert_rgb"],
+        )
+
+
+def _ensure_processor_defaults(processor: AutoProcessor | VipLlavaProcessorAdapter) -> None:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        if getattr(tokenizer, "pad_token", None) is None and getattr(tokenizer, "eos_token", None):
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = getattr(tokenizer, "padding_side", "left")
+        if getattr(tokenizer, "chat_template", None) in (None, {}):
+            tokenizer.chat_template = DEFAULT_VIP_LLAVA_CHAT_TEMPLATE
+
+    if getattr(processor, "chat_template", None) in (None, {}):
+        processor.chat_template = DEFAULT_VIP_LLAVA_CHAT_TEMPLATE
+    if getattr(processor, "image_token", None) is None:
+        setattr(processor, "image_token", "<image>")
 
 
 def annotate_overlay_image(
