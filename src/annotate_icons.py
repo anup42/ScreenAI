@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=32,
+        default=4,
         help="Maximum number of tokens to generate per icon",
     )
     parser.add_argument(
@@ -307,6 +307,8 @@ def _resolve_modal_device_map(model: PreTrainedModel) -> Tuple[torch.device, Dic
     before calling ``generate``; otherwise PyTorch keeps everything on the
     first GPU.
     """
+    
+    print(getattr(model, "hf_device_map", None))
 
     device_map = getattr(model, "hf_device_map", None)
     if not isinstance(device_map, dict) or not device_map:
